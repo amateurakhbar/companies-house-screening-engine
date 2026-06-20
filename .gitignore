@@ -1,0 +1,23 @@
+# Generated artifacts (regenerable by running the pipeline)
+output/
+
+# Caches: website scrapes, LLM classification, CH pulls, URL discovery
+data/cache/
+
+# Raw / immutable source data (large; regenerable from Companies House)
+potentials/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# API keys — never commit
+secrets/
+.env
+.env.*
+
+# OS noise
+.DS_Store
+~$*
