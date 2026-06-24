@@ -1,4 +1,4 @@
-"""05 — LLM classification layer (Google Gemini / gemini-2.0-flash).
+"""05 — LLM classification layer (Claude, via the Anthropic API).
 
 Reads a firm's name + SIC (+ scraped website text when available) and emits a
 strict-JSON classification validated against the frozen schema in
@@ -20,7 +20,7 @@ Caching: every result is cached at data/cache/llm_classify/<slug>__<PROMPT_VERSI
 so re-runs are free and deterministic. Bump PROMPT_VERSION to invalidate.
 
 Usage (gold set only — the default and only supported scope here):
-  GEMINI_API_KEY=... python3 src/05_classify_llm.py --gold
+  ANTHROPIC_API_KEY=... python3 src/05_classify_llm.py --gold
 
 Designed to refuse to run the full dataset unless explicitly asked, to avoid
 accidental LLM spend.
@@ -52,14 +52,13 @@ RULES = ROOT / "output" / "rules_labels.parquet"
 SCRAPES = ROOT / "data" / "cache" / "scrapes"
 CACHE = ROOT / "data" / "cache" / "llm_classify"
 
-# gemini-2.5-flash via the google-genai SDK with thinking DISABLED
-# (thinking_budget=0). The deprecated google-generativeai 0.8.6 SDK has no
-# thinking-budget control, and gemini-3.5-flash's default dynamic thinking ate
-# the output budget; 2.5-flash with thinking off returns clean JSON cheaply.
-# New PROMPT_VERSION namespaces this model's cache separately from the
-# 3.5-flash results so the pilot measures fresh cost honestly.
-MODEL = "gemini-2.5-flash-lite"
-PROMPT_VERSION = "gemini25-flashlite-v1"
+# Classification runs on Claude via the Anthropic API. Opus 4.8 is the default
+# (house standard); for a high-volume full run set CLASSIFY_MODEL=claude-haiku-4-5
+# to cut cost. Thinking is off by default on 4.8 (clean JSON, cheap) and the
+# large rubric system prompt is prompt-cached. PROMPT_VERSION is derived from the
+# model so the on-disk cache never collides across models.
+MODEL = os.environ.get("CLASSIFY_MODEL", "claude-opus-4-8")
+PROMPT_VERSION = f"claude-{MODEL}-v1"
 
 # scrape_status values that mean "no website text available".
 NO_TEXT_STATUSES = {"no-url", "failed", "parked", "not-attempted"}
@@ -70,26 +69,24 @@ SCRAPE_TEXT_CAP = 2000  # chars of website text fed to the model
 # --------------------------------------------------------------------------
 # API key loading
 # --------------------------------------------------------------------------
-def _load_api_key() -> str:
-    """GEMINI_API_KEY from the environment, else a .env / secrets file.
+def _load_api_key() -> str | None:
+    """ANTHROPIC_API_KEY from the environment, else a .env / secrets file.
 
-    The key is read at runtime only to authenticate the API call; it is never
-    logged or persisted to the cache.
+    Returns None when not found locally, in which case the Anthropic SDK
+    resolves credentials itself (env var or an `ant auth login` profile). The
+    key is read at runtime only to authenticate the call; never logged or cached.
     """
-    key = os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
         return key.strip()
     for candidate in (ROOT / ".env", ROOT / "secrets" / ".env",
-                      ROOT / "secrets" / "gemini.env"):
+                      ROOT / "secrets" / "anthropic.env"):
         if candidate.exists():
             for line in candidate.read_text().splitlines():
                 line = line.strip()
-                if line.startswith("GEMINI_API_KEY"):
+                if line.startswith("ANTHROPIC_API_KEY"):
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit(
-        "GEMINI_API_KEY not found. Set the env var or add it to .env / "
-        "secrets/.env, e.g.  GEMINI_API_KEY=... python3 src/05_classify_llm.py --gold"
-    )
+    return None  # let the SDK resolve from env / profile
 
 
 # --------------------------------------------------------------------------
@@ -166,50 +163,56 @@ def _user_prompt(name: str, sic: str, text: str | None) -> str:
 
 
 # --------------------------------------------------------------------------
-# Gemini call (cached) — google-genai SDK, thinking disabled
+# Claude call (cached) — Anthropic SDK; strict JSON via prompt, fences stripped
 # --------------------------------------------------------------------------
-_GENAI_CLIENT = None
+_CLIENT = None
 
 
-def _client(api_key: str):
-    global _GENAI_CLIENT
-    if _GENAI_CLIENT is None:
-        from google import genai  # local import: keep schema consumers light
-        _GENAI_CLIENT = genai.Client(api_key=api_key)
-    return _GENAI_CLIENT
+def _client(api_key: str | None):
+    global _CLIENT
+    if _CLIENT is None:
+        import anthropic  # local import: keep schema consumers light
+        # SDK retries 429/5xx with exponential backoff; key resolves from the
+        # arg, else env / `ant` profile.
+        _CLIENT = (anthropic.Anthropic(api_key=api_key, max_retries=6)
+                   if api_key else anthropic.Anthropic(max_retries=6))
+    return _CLIENT
 
 
-def _call_gemini(api_key: str, name: str, sic: str, text: str | None,
-                 *, max_retries: int = 4) -> tuple[str, bool, dict]:
-    """Return (raw_content, ok, usage). JSON output enforced via
-    response_mime_type; thinking is disabled (thinking_budget=0) so gemini-2.5-
-    flash returns clean JSON without spending budget on reasoning tokens.
-    usage = {'in', 'out', 'think'} actual token counts (0s on failure)."""
-    from google.genai import types
+def _call_claude(api_key: str | None, name: str, sic: str, text: str | None
+                 ) -> tuple[str, bool, dict]:
+    """Return (raw_content, ok, usage). Strict JSON is requested in the system
+    prompt (Claude has no response-format flag); markdown fences are stripped
+    defensively below. The large rubric system prompt is prompt-cached
+    (cache_control: ephemeral), so the gold/full run pays ~0.1x for it after the
+    first call. usage = {'in', 'out', 'think'} token counts (0s on failure).
+    The SDK retries 429/5xx with exponential backoff (max_retries on the client)."""
+    import anthropic
 
     client = _client(api_key)
-    config = types.GenerateContentConfig(
-        system_instruction=_system_prompt(),
-        temperature=0.0,
-        response_mime_type="application/json",
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-    )
-    delay = 2.0
-    for _ in range(max_retries):
-        try:
-            resp = client.models.generate_content(
-                model=MODEL, contents=_user_prompt(name, sic, text),
-                config=config)
-            u = resp.usage_metadata
-            usage = {
-                "in": int(getattr(u, "prompt_token_count", 0) or 0),
-                "out": int(getattr(u, "candidates_token_count", 0) or 0),
-                "think": int(getattr(u, "thoughts_token_count", 0) or 0),
-            }
-            return resp.text, True, usage
-        except Exception:  # noqa: BLE001 — backoff on rate-limit / transient errors
-            time.sleep(delay); delay *= 2
-    return "", False, {"in": 0, "out": 0, "think": 0}
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=[{"type": "text", "text": _system_prompt(),
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user",
+                       "content": _user_prompt(name, sic, text)}],
+        )
+    except anthropic.APIError:  # non-retryable, or retries exhausted
+        return "", False, {"in": 0, "out": 0, "think": 0}
+
+    raw = next((b.text for b in resp.content if b.type == "text"), "")
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())  # strip any fences
+    u = resp.usage
+    usage = {
+        "in": (int(getattr(u, "input_tokens", 0) or 0)
+               + int(getattr(u, "cache_read_input_tokens", 0) or 0)
+               + int(getattr(u, "cache_creation_input_tokens", 0) or 0)),
+        "out": int(getattr(u, "output_tokens", 0) or 0),
+        "think": 0,
+    }
+    return raw, True, usage
 
 
 def classify_firm(api_key: str, cn: str, name: str, sic: str,
@@ -251,7 +254,7 @@ def classify_firm(api_key: str, cn: str, name: str, sic: str,
         cache_file.write_text(json.dumps(result))
         return result
 
-    raw, ok, usage = _call_gemini(api_key, name, sic, text)
+    raw, ok, usage = _call_claude(api_key, name, sic, text)
     result = {
         "CompanyNumber": cn, "scrape_status": scrape_status,
         "had_text": bool(text), "raw": raw, "api_ok": ok, "usage": usage,

@@ -1,0 +1,13 @@
+# Core
+pandas
+pyarrow            # parquet I/O (rules layer, intermediates)
+
+# LLM classification step (src/05) — Claude via the Anthropic API
+anthropic>=0.40
+
+# Enrichment / scraping steps (scripts/) — separate providers
+google-genai       # niche one-liners, descriptors, defensibility scoring
+requests           # Serper search + website fetches
+
+# ponytail: not pinned — this is a research repo, not a shipped library.
+# Pin exact versions if you need reproducible installs.
