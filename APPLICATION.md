@@ -22,7 +22,7 @@ The integration is built to keep cost and reliability sane at register scale:
 
 ## How it's evaluated
 
-Classification quality is measured against a gold set of about 149 human-labeled firms, reporting per-axis agreement. To keep the headline honest, agreement is reported separately for the 84 firms Claude actually classified (those with website text) versus the full set. On those 84, classifying blind from only company name, SIC code, and scraped website text, `claude-opus-4-8` agrees with the human labels 86% on average across axes: stack-layer 79%, function 93%, business-model 86%, vertical 93%, and derived niche 82%.
+Classification quality is measured against a gold set of about 149 human-labeled firms, reporting per-axis agreement. To keep the headline honest, agreement is reported separately for the 84 firms Claude actually classified (those with website text) versus the full set. On those 84, classifying blind from only company name, SIC code, and scraped website text, `claude-opus-4-8` agrees with the human labels 86% on average across axes: stack-layer 79%, function 93%, business-model 86%, vertical 93%, and derived niche 82%. These gold-set figures were reproduced by running the classification directly through Claude; the Anthropic API path is what makes the full-register run automatable and cache-efficient.
 
 ## Why support would help
 

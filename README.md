@@ -60,6 +60,11 @@ CLASSIFY_MODEL=claude-haiku-4-5 \
   python3 src/05_classify_llm.py --gold            # cheaper model for a high-volume run
 ```
 
+**Two ways to run the classifier:**
+
+- **Anthropic API (`src/05`, the production path):** scripted, prompt-cached, checkpointed and resumable. This is the way to run it unattended at register scale.
+- **Within Claude (no API key):** feed the same blind inputs (name + SIC + scraped website text) and the rubric to any Claude session (a chat or an agent) and have it return the labels. This is how the gold-set agreement figures were reproduced; it is ideal for the gold set or spot-checks, while the API path is what scales to the full register.
+
 > **Scope — mixed-provider, not Claude end-to-end.** Claude does the **core classification**
 > (`src/05`). Some downstream enrichment steps under `scripts/` (niche one-liners, descriptors,
 > defensibility scoring) use a **separate LLM (Google Gemini)**, which is why `requirements.txt`
