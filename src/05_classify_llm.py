@@ -34,7 +34,6 @@ import os
 import pathlib
 import re
 import sys
-import time
 
 import pandas as pd
 
@@ -253,7 +252,10 @@ def classify_firm(api_key: str, cn: str, name: str, sic: str,
             "CompanyNumber": cn, "scrape_status": scrape_status,
             "had_text": False, "raw": raw, "api_ok": True, "skipped_llm": True,
         }
-        cache_file.write_text(json.dumps(result))
+        # ponytail: do NOT cache the no-text short-circuit — it costs no API call to
+        # recompute, and caching it would serve a stale insufficient_evidence if the
+        # firm's scrape lands on a later pass (the cache key encodes the model, not
+        # text-availability).
         return result
 
     raw, ok, usage = _call_claude(api_key, name, sic, text)
@@ -324,8 +326,8 @@ def parse_and_validate(result: dict) -> dict:
             base, vpart = niche.split("__", 1)
             if base not in fns:
                 niche = INSUFFICIENT_EVIDENCE       # function-part not assigned
-            elif vpart not in valid_v:
-                niche = base                         # bad vertical -> horizontal
+            elif vpart not in vts:
+                niche = base                         # vertical not assigned -> horizontal
         elif niche not in fns:
             niche = INSUFFICIENT_EVIDENCE
 
@@ -360,7 +362,7 @@ def parse_and_validate(result: dict) -> dict:
         "vertical": [v.value for v in co.vertical],
         "primary_niche": niche_norm,
         "primary_niche_raw": niche_raw,
-        "confidence": co.confidence,
+        "confidence": round(co.confidence, 2),
         "rationale": co.rationale,
         "needs_review": co.needs_review,
     })
@@ -441,6 +443,9 @@ def _agreement(rows: list[dict], gold: pd.DataFrame) -> dict:
 
 def report(parsed: list[dict], gold: pd.DataFrame) -> None:
     n = len(parsed)
+    if not n:
+        print("report: no rows to summarise.")
+        return
     json_valid = sum(p["json_valid"] for p in parsed)
     schema_ok = sum(p["schema_ok"] for p in parsed)
     ok_rows = [p for p in parsed if p["schema_ok"]]
@@ -461,9 +466,20 @@ def report(parsed: list[dict], gold: pd.DataFrame) -> None:
     print(f"\ninsufficient_evidence      : {insuff}/{schema_ok}")
 
     agr = _agreement(ok_rows, gold)
-    print("\nagreement with human gold (per axis):")
+    print("\nagreement with human gold — ALL rows incl. no-text routing (per axis):")
     for axis, rate in agr["rates"].items():
         print(f"  {axis:<16} {rate:.1%}")
+
+    # Headline number: agreement on firms Claude ACTUALLY classified. No-text firms
+    # are routed to insufficient_evidence without an LLM call, so including them
+    # blends Claude's labels with a deterministic routing policy and understates it.
+    scraped = [p for p in ok_rows if p["scrape_status"] == "scraped"]
+    if scraped:
+        agr_s = _agreement(scraped, gold)
+        print(f"\nagreement on firms Claude actually classified "
+              f"(scrape_status=scraped, n={len(scraped)}) (per axis):")
+        for axis, rate in agr_s["rates"].items():
+            print(f"  {axis:<16} {rate:.1%}")
 
     # primary_niche agreement: before vs after the __horizontal normalization.
     g = gold.set_index("CompanyNumber")
