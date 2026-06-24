@@ -58,7 +58,7 @@ CACHE = ROOT / "data" / "cache" / "llm_classify"
 # large rubric system prompt is prompt-cached. PROMPT_VERSION is derived from the
 # model so the on-disk cache never collides across models.
 MODEL = os.environ.get("CLASSIFY_MODEL", "claude-opus-4-8")
-PROMPT_VERSION = f"claude-{MODEL}-v1"
+PROMPT_VERSION = f"{MODEL}-v1"
 
 # scrape_status values that mean "no website text available".
 NO_TEXT_STATUSES = {"no-url", "failed", "parked", "not-attempted"}
@@ -199,7 +199,9 @@ def _call_claude(api_key: str | None, name: str, sic: str, text: str | None
             messages=[{"role": "user",
                        "content": _user_prompt(name, sic, text)}],
         )
-    except anthropic.APIError:  # non-retryable, or retries exhausted
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+        raise  # bad key / no access: fail loud, don't mark every row needs_review
+    except anthropic.APIError:  # other terminal error after the SDK's retries
         return "", False, {"in": 0, "out": 0, "think": 0}
 
     raw = next((b.text for b in resp.content if b.type == "text"), "")
@@ -235,8 +237,8 @@ def classify_firm(api_key: str, cn: str, name: str, sic: str,
     if not has_text:
         # No website text available -> route straight to insufficient_evidence
         # without spending an API call. Cost cut: ~40% of the dataset has no
-        # scraped text, and the model already returns insufficient_evidence
-        # for most of these firms anyway (see flash bake-off: 64/149).
+        # scraped text, and on the gold set the model returns insufficient_evidence
+        # for most no-text firms anyway (~64 of 149), so the call rarely adds signal.
         raw = json.dumps({
             "stack_layer": "services",
             "function": ["other"],
@@ -302,15 +304,10 @@ def parse_and_validate(result: dict) -> dict:
 
     needs_review = bool(data.get("needs_review", False))
     niche = data.get("primary_niche", "")
-
-    # Opaque-name guard: no text + a specific niche guess is downgraded to
-    # insufficient_evidence + needs_review (never a guess without text).
-    if not had_text and niche and niche != INSUFFICIENT_EVIDENCE:
-        # Only force the escape hatch when the model itself was unsure.
-        if conf < 0.35:
-            niche = INSUFFICIENT_EVIDENCE
-            data["function"] = ["other"]
-            needs_review = True
+    # ponytail: no-text firms are short-circuited to insufficient_evidence in
+    # classify_firm before any LLM call, so they never reach here carrying a real
+    # niche guess. The old "opaque-name guard" branch was therefore unreachable
+    # and has been removed; the conf cap above is the live no-text safety net.
 
     # Coerce off-vocabulary multi-labels to the closed set instead of rejecting
     # the whole record: the model emits real sectors (hospitality, automotive,
