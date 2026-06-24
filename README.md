@@ -60,6 +60,11 @@ CLASSIFY_MODEL=claude-haiku-4-5 \
   python3 src/05_classify_llm.py --gold            # cheaper model for a high-volume run
 ```
 
+> **Scope — mixed-provider, not Claude end-to-end.** Claude does the **core classification**
+> (`src/05`). Some downstream enrichment steps under `scripts/` (niche one-liners, descriptors,
+> defensibility scoring) use a **separate LLM (Google Gemini)**, which is why `requirements.txt`
+> also pulls `google-genai`.
+
 ---
 
 ## How to read the numbers (important)
@@ -93,7 +98,8 @@ Quality-of-Earnings review, not numbers to wire against.**
   *reproducible-by-code*; the bulky data state lives locally.
 
 To run it you need an **`ANTHROPIC_API_KEY`** (classification, `src/05`), a Companies House API
-key, and a search API key (for website discovery), then `make all` for the classification pipeline.
+key, a search API key (for website discovery), and a Gemini key (the `scripts/` enrichment steps),
+then `make all` for the classification pipeline.
 Run `make help` to list targets.
 
 ---
